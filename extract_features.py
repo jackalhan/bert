@@ -22,7 +22,8 @@ import codecs
 import collections
 import json
 import re
-
+import os
+import glob
 import modeling
 import tokenization
 import tensorflow as tf
@@ -33,7 +34,12 @@ FLAGS = flags.FLAGS
 
 flags.DEFINE_string("input_file", None, "")
 
-flags.DEFINE_string("output_file", None, "")
+#flags.DEFINE_string("output_file", None, "")
+
+
+flags.DEFINE_integer(
+    "window_length", 0,
+    "if 0, there is no window, other wise take this number into consideration.")
 
 flags.DEFINE_string("layers", "-1,-2,-3,-4", "")
 
@@ -356,15 +362,6 @@ def main(_):
           num_shards=FLAGS.num_tpu_cores,
           per_host_input_for_training=is_per_host))
 
-  examples = read_examples(FLAGS.input_file)
-
-  features = convert_examples_to_features(
-      examples=examples, seq_length=FLAGS.max_seq_length, tokenizer=tokenizer)
-
-  unique_id_to_feature = {}
-  for feature in features:
-    unique_id_to_feature[feature.unique_id] = feature
-
   model_fn = model_fn_builder(
       bert_config=bert_config,
       init_checkpoint=FLAGS.init_checkpoint,
@@ -372,47 +369,103 @@ def main(_):
       use_tpu=FLAGS.use_tpu,
       use_one_hot_embeddings=FLAGS.use_one_hot_embeddings)
 
-  # If TPU is not available, this will fall back to normal Estimator on CPU
-  # or GPU.
   estimator = tf.contrib.tpu.TPUEstimator(
       use_tpu=FLAGS.use_tpu,
       model_fn=model_fn,
       config=run_config,
       predict_batch_size=FLAGS.batch_size)
 
-  input_fn = input_fn_builder(
-      features=features, seq_length=FLAGS.max_seq_length)
+  root_folder = FLAGS.input_file.rpartition(os.path.sep)[0]
+  folder_name = FLAGS.input_file.rpartition(os.path.sep)[2]
 
-  with codecs.getwriter("utf-8")(tf.gfile.Open(FLAGS.output_file,
-                                               "w")) as writer:
-    for result in estimator.predict(input_fn, yield_single_examples=True):
-      unique_id = int(result["unique_id"])
-      feature = unique_id_to_feature[unique_id]
-      output_json = collections.OrderedDict()
-      output_json["linex_index"] = unique_id
-      all_features = []
-      for (i, token) in enumerate(feature.tokens):
-        all_layers = []
-        for (j, layer_index) in enumerate(layer_indexes):
-          layer_output = result["layer_output_%d" % j]
-          layers = collections.OrderedDict()
-          layers["index"] = layer_index
-          layers["values"] = [
-              round(float(x), 6) for x in layer_output[i:(i + 1)].flat
-          ]
-          all_layers.append(layers)
-        features = collections.OrderedDict()
-        features["token"] = token
-        features["layers"] = all_layers
-        all_features.append(features)
-      output_json["features"] = all_features
-      writer.write(json.dumps(output_json) + "\n")
+  if os.path.isfile(FLAGS.input_file):
+      examples = read_examples(FLAGS.input_file)
+      new_output_file = os.path.join(root_folder, folder_name + '_embeddings')
+      start_generation(examples=examples,
+                       tokenizer=tokenizer,
+                       estimator=estimator,
+                       layer_indexes=layer_indexes,
+                       output_file=new_output_file,
+                       export_type='json',
+                       examples_guide=None)
+  else:
+      os.chdir(FLAGS.input_file)
+      examples_guide = []
+      examples = []
+      window = FLAGS.window_length
+      new_output_file = os.path.join(root_folder, 'embeddings')
+      file_extension = '.txt'
+      number_of_files = len([name for name in os.listdir('.') if os.path.isfile(name) and name.endswith(file_extension)])
+      #for file in glob.glob(file_extension):
+      for file in range(1, number_of_files + 1, 1):
+          try:
+              #file_name = file.rpartition('.')[0]
+              example = read_examples(str(file) + file_extension)
+              # for num, sub_ex in enumerate(example):
+              #     guide_details = dict()
+              #     guide_details[
+              #         'content_name'] = file
+              #     guide_details['content_id'] = int(file_name) - 1 ## in order to align index with actual indices of contents in the original set
+              #     guide_details['content_line_index'] = num
+              #     tokens = sub_ex.text_a.split(' ')
+              #     sub_ex_size = len(tokens)
+              #     if num > 0:
+              #         sub_ex_size -= window
+              #     guide_details['content_line_token_size'] = sub_ex_size
+              #     examples_guide.append(guide_details)
+              examples.append(example)
+          except Exception as ex:
+              print("{} file is not found".format(str(file) + file_extension))
 
+      examples = [j for i in examples for j in i]
+      start_generation(examples=examples,
+                       tokenizer=tokenizer,
+                       estimator=estimator,
+                       layer_indexes=layer_indexes,
+                       output_file=new_output_file,
+                       export_type='json',
+                       examples_guide=None) #examples_guide
+
+def start_generation(examples, tokenizer, estimator, layer_indexes, output_file, examples_guide = None, export_type='json'):
+    features = convert_examples_to_features(
+        examples=examples, seq_length=FLAGS.max_seq_length, tokenizer=tokenizer)
+
+    unique_id_to_feature = {}
+    for feature in features:
+        unique_id_to_feature[feature.unique_id] = feature
+
+    input_fn = input_fn_builder(
+        features=features, seq_length=FLAGS.max_seq_length)
+
+    with codecs.getwriter("utf-8")(tf.gfile.Open(output_file +'.' + export_type,
+                                                 "w")) as writer:
+        for result in estimator.predict(input_fn, yield_single_examples=True):
+            unique_id = int(result["unique_id"])
+            feature = unique_id_to_feature[unique_id]
+            output_json = collections.OrderedDict()
+            output_json["linex_index"] = unique_id
+            all_features = []
+            for (i, token) in enumerate(feature.tokens):
+                all_layers = []
+                for (j, layer_index) in enumerate(layer_indexes):
+                    layer_output = result["layer_output_%d" % j]
+                    layers = collections.OrderedDict()
+                    layers["index"] = layer_index
+                    layers["values"] = [
+                        round(float(x), 6) for x in layer_output[i:(i + 1)].flat
+                    ]
+                    all_layers.append(layers)
+                features = collections.OrderedDict()
+                features["token"] = token
+                features["layers"] = all_layers
+                all_features.append(features)
+            output_json["features"] = all_features
+            writer.write(json.dumps(output_json) + "\n")
 
 if __name__ == "__main__":
   flags.mark_flag_as_required("input_file")
   flags.mark_flag_as_required("vocab_file")
   flags.mark_flag_as_required("bert_config_file")
   flags.mark_flag_as_required("init_checkpoint")
-  flags.mark_flag_as_required("output_file")
+  #flags.mark_flag_as_required("output_file")
   tf.app.run()
