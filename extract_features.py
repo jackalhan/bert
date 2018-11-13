@@ -42,6 +42,14 @@ flags.DEFINE_integer(
     "window_length", 0,
     "if 0, there is no window, other wise take this number into consideration.")
 
+flags.DEFINE_integer(
+    "partition_index_start", 1,
+    "if 0, there is no window, other wise take this number into consideration.")
+
+flags.DEFINE_integer(
+    "partition_size", 1000,
+    "if 0, there is no window, other wise take this number into consideration.")
+
 flags.DEFINE_string("layers", "-1,-2,-3,-4", "")
 
 flags.DEFINE_string(
@@ -322,10 +330,10 @@ def _truncate_seq_pair(tokens_a, tokens_b, max_length):
       tokens_b.pop()
 
 
-def read_examples(input_file):
+def read_examples(input_file, unique_id=0):
   """Read a list of `InputExample`s from an input file."""
   examples = []
-  unique_id = 0
+  _unique_id = unique_id
   with tf.gfile.GFile(input_file, "r") as reader:
     while True:
       line = tokenization.convert_to_unicode(reader.readline())
@@ -341,9 +349,9 @@ def read_examples(input_file):
         text_a = m.group(1)
         text_b = m.group(2)
       examples.append(
-          InputExample(unique_id=unique_id, text_a=text_a, text_b=text_b))
-      unique_id += 1
-  return examples
+          InputExample(unique_id=_unique_id, text_a=text_a, text_b=text_b))
+      _unique_id += 1
+  return examples, _unique_id
 
 
 def main(_):
@@ -380,7 +388,7 @@ def main(_):
   folder_name = FLAGS.input_file.rpartition(os.path.sep)[2]
 
   if os.path.isfile(FLAGS.input_file):
-      examples = read_examples(FLAGS.input_file)
+      examples, _unique_id = read_examples(FLAGS.input_file)
       new_output_file = os.path.join(root_folder, folder_name + '_embeddings')
       start_generation(examples=examples,
                        tokenizer=tokenizer,
@@ -394,30 +402,34 @@ def main(_):
       examples_guide = []
       examples = []
       window = FLAGS.window_length
-      new_output_file = os.path.join(root_folder, 'embeddings')
       file_extension = '.txt'
       number_of_files = len([name for name in os.listdir('.') if os.path.isfile(name) and name.endswith(file_extension)])
+      unique_id_setter = 0
+      partition_end = 0
       #for file in glob.glob(file_extension):
-      for file in tqdm(range(1, number_of_files + 1, 1)):
+      for file in tqdm(range(FLAGS.partition_index_start, FLAGS.partition_index_start + FLAGS.partition_size, 1)):
           try:
-              #file_name = file.rpartition('.')[0]
-              example = read_examples(str(file) + file_extension)
-              # for num, sub_ex in enumerate(example):
-              #     guide_details = dict()
-              #     guide_details[
-              #         'content_name'] = file
-              #     guide_details['content_id'] = int(file_name) - 1 ## in order to align index with actual indices of contents in the original set
-              #     guide_details['content_line_index'] = num
-              #     tokens = sub_ex.text_a.split(' ')
-              #     sub_ex_size = len(tokens)
-              #     if num > 0:
-              #         sub_ex_size -= window
-              #     guide_details['content_line_token_size'] = sub_ex_size
-              #     examples_guide.append(guide_details)
-              examples.append(example)
+              if file <= number_of_files:
+                  #file_name = file.rpartition('.')[0]
+                  partition_end = file
+                  example,unique_id_setter = read_examples(str(file) + file_extension, unique_id_setter)
+                  for num, sub_ex in enumerate(example):
+                      guide_details = dict()
+                      guide_details[
+                          'content_name'] = str(file) + file_extension
+                      guide_details['content_id'] = file ## in order to align index with actual indices of contents in the original set
+                      guide_details['content_line_index'] = num
+                      tokens = sub_ex.text_a.split(' ')
+                      sub_ex_size = len(tokens)
+                      if num > 0:
+                          sub_ex_size -= window
+                      guide_details['content_line_token_size'] = sub_ex_size
+                      examples_guide.append(guide_details)
+                  examples.append(example)
           except Exception as ex:
               print("{} file is not found".format(str(file) + file_extension))
 
+      new_output_file = os.path.join(root_folder, 'embeddings_part_from_'+str(FLAGS.partition_index_start) + '_to_' + str(partition_end))
       examples = [j for i in examples for j in i]
       start_generation(examples=examples,
                        tokenizer=tokenizer,
@@ -425,8 +437,16 @@ def main(_):
                        layer_indexes=layer_indexes,
                        output_file=new_output_file,
                        export_type='json',
-                       examples_guide=None) #examples_guide
-
+                       examples_guide=examples_guide) #examples_guide
+      print(15 * '*')
+      print("Processed partition starting with an index of {}".format(FLAGS.partition_index_start))
+      if file <= number_of_files:
+        print("Next partition starting index should be set to {}".format(FLAGS.partition_index_start + FLAGS.partition_size))
+      try:
+        print("{}/{} processed".format(partition_end, number_of_files))
+      except:
+        pass
+      print(15 * '*')
 def start_generation(examples, tokenizer, estimator, layer_indexes, output_file, examples_guide = None, export_type='json'):
     features = convert_examples_to_features(
         examples=examples, seq_length=FLAGS.max_seq_length, tokenizer=tokenizer)
@@ -440,11 +460,12 @@ def start_generation(examples, tokenizer, estimator, layer_indexes, output_file,
 
     with codecs.getwriter("utf-8")(tf.gfile.Open(output_file +'.' + export_type,
                                                  "w")) as writer:
-        for result in estimator.predict(input_fn, yield_single_examples=True):
+        for indx, result in enumerate(tqdm(estimator.predict(input_fn, yield_single_examples=True))):
             unique_id = int(result["unique_id"])
             feature = unique_id_to_feature[unique_id]
             output_json = collections.OrderedDict()
             output_json["linex_index"] = unique_id
+            output_json["guide"] = examples_guide[indx]
             all_features = []
             for (i, token) in enumerate(feature.tokens):
                 all_layers = []
