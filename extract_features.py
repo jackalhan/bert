@@ -27,6 +27,7 @@ import glob
 import modeling
 import tokenization
 import tensorflow as tf
+from tqdm import tqdm
 
 flags = tf.flags
 
@@ -49,7 +50,7 @@ flags.DEFINE_string(
     "This specifies the model architecture.")
 
 flags.DEFINE_integer(
-    "max_seq_length", 128,
+    "max_seq_length", 512,
     "The maximum total input sequence length after WordPiece tokenization. "
     "Sequences longer than this will be truncated, and sequences shorter "
     "than this will be padded.")
@@ -397,7 +398,7 @@ def main(_):
       file_extension = '.txt'
       number_of_files = len([name for name in os.listdir('.') if os.path.isfile(name) and name.endswith(file_extension)])
       #for file in glob.glob(file_extension):
-      for file in range(1, number_of_files + 1, 1):
+      for file in tqdm(range(1, number_of_files + 1, 1)):
           try:
               #file_name = file.rpartition('.')[0]
               example = read_examples(str(file) + file_extension)
